@@ -1,0 +1,93 @@
+﻿#pragma kernel dtwCalc
+
+RWStructuredBuffer<float> globalCostMatrix; // matrix of total cost of path from motionQuery[0] to motionQuery[n]
+RWStructuredBuffer<float> costMatrix; // cost (distance) between a point in a queryTemplate and a point in a motionTemplate
+RWStructuredBuffer<float4> motionQuery; // input sequence
+RWStructuredBuffer<float4> motionTemplate; // motion template for comparison
+
+[numthreads(10, 1, 1)]
+
+void dtwCalc (uint3 id : SV_DispatchThreadID)
+{
+    int queryLength = 16;
+
+    for (int i = 0; i < queryLength; i++)
+    {
+        // STEP 0. Calculate cost matrix and initialize first column of global matrix
+        if (i == 0)
+        {
+            /* 
+               Part 1. calcualte costMatrix first. Each thread calculate one row
+               I could put it into a separate kernel, but I think this is faster, cause I don't need to move the costMatrix buffer back to CPU
+            */   
+            for (int j = 0; j < queryLength; j++)
+            {
+                float x = (motionQuery[j].x - motionTemplate[id.x].x) * (motionQuery[j].x - motionTemplate[id.x].x);
+                float y = (motionQuery[j].y - motionTemplate[id.x].y) * (motionQuery[j].y - motionTemplate[id.x].y);
+                float z = (motionQuery[j].z - motionTemplate[id.x].z) * (motionQuery[j].z - motionTemplate[id.x].z);
+                float w = (motionQuery[j].w - motionTemplate[id.x].w) * (motionQuery[j].w - motionTemplate[id.x].w);
+                float totalCost = x + y + z + w; // square the distance
+                costMatrix[id.x * queryLength + j] = totalCost;
+            }
+            if (id.x == 0)
+            {
+                globalCostMatrix[0] = costMatrix[0]; //0; //globdist[0][0] = Dist[0][0];
+            }
+            else
+            {
+                globalCostMatrix[id.x * queryLength] = costMatrix[id.x * queryLength]; //1000; //for (j=1; j<xsize; j++)
+                                                                  //globdist[j][0] = VERY_BIG;
+            }
+        }
+
+        /*// STEP 1. Calculate second column
+        if (i == 1)
+        {
+            if (id.x == 0)
+                globalCostMatrix[1] = costMatrix[0] + costMatrix[1]; // 1000; // globdist[0][1] = VERY_BIG;
+            if (id.x == 1) 
+                globalCostMatrix[id.x * queryLength + 1] = costMatrix[0] + costMatrix[queryLength + 1]; // globdist[1][1] = globdist[0][0] + Dist[1][1];
+            if (id.x > 1)
+                globalCostMatrix[id.x * queryLength + 1] = 1000; // for(j=2;j<xsize;j++)
+                                                                 // globdist[j][1] = VERY_BIG;
+        } */
+        
+        // STEP 3 to N Calculate third to N columns
+        if (i > 0)
+        {
+            if (id.x == 0)
+                globalCostMatrix[i] = globalCostMatrix[i - 1] + costMatrix[i]; //1000;// globdist[0][i] = VERY_BIG;  
+            
+            if (id.x == 1)
+                globalCostMatrix[id.x * queryLength + i] = globalCostMatrix[i - 1] + costMatrix[id.x * queryLength + i]; //globdist[1][i] = globdist[0][i - 1] + Dist[1][i];
+            
+            if (id.x > 1)
+            {
+                float cheapest = 0;
+                float top = globalCostMatrix[(id.x - 1) * queryLength + (i - 2)] + costMatrix[id.x       * queryLength + (i - 1)] + costMatrix[id.x * queryLength + i];
+                float mid = globalCostMatrix[(id.x - 1) * queryLength + (i - 1)] + costMatrix[id.x       * queryLength + i];
+                float bot = globalCostMatrix[(id.x - 2) * queryLength + (i - 1)] + costMatrix[(id.x - 1) * queryLength + i] + costMatrix[id.x * queryLength + i];
+                if ((top < mid) && (top < bot))
+                {
+                    cheapest = top;
+                }
+                else if (mid < bot)
+                {
+                    cheapest = mid;
+                }
+                else
+                {
+                    cheapest = bot;
+                }
+                globalCostMatrix[id.x * queryLength + i] = cheapest;
+            }
+        }
+
+        // This is a trick that I hope works. 
+        // After each step, I basically wait till entire column finishes before going to next column, 
+        // because I need the values from the previous column. 
+        // Each thread works on a separate row(s) of the same column and has, more less, the same amount of work, so there should be no long-time lockouts
+
+        AllMemoryBarrierWithGroupSync();
+    }
+}
